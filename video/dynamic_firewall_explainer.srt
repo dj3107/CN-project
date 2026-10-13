@@ -1,0 +1,192 @@
+1
+00:00:00,700 --> 00:00:04,028
+What if your network could spot an attack, and fight back on its own?
+
+2
+00:00:04,428 --> 00:00:14,817
+This is the Dynamic Firewall with Security Event Logger: a software-defined networking project built with Mininet, the Ryu controller, and Python TCP sockets.
+
+3
+00:00:15,217 --> 00:00:17,351
+Let's see what it does, and how it does it.
+
+4
+00:00:19,251 --> 00:00:26,931
+A traditional firewall is static. Its rules are written in advance, and it can't react to what the application is actually seeing.
+
+5
+00:00:27,331 --> 00:00:38,957
+This project closes that gap. A TCP log server watches its own clients, and when one misbehaves, it asks an SDN controller to change the switch's rules, while the network is running.
+
+6
+00:00:39,357 --> 00:00:43,432
+And when the misbehaviour stops, the rules are removed again, automatically.
+
+7
+00:00:45,132 --> 00:00:47,564
+Here is the network, emulated in Mininet.
+
+8
+00:00:47,964 --> 00:00:57,500
+Host h1 runs the log server, listening on two TCP ports: 9000 for logging, and 9001 for a protected admin service.
+
+9
+00:00:57,900 --> 00:01:06,156
+Host h2 is a well-behaved, trusted client. Host h3 plays the attacker: it floods the server, or touches ports it shouldn't.
+
+10
+00:01:06,556 --> 00:01:14,257
+All three hosts connect through a single Open vSwitch, s1, which speaks OpenFlow 1.3 to the Ryu controller.
+
+11
+00:01:14,657 --> 00:01:26,028
+Because Mininet hosts live in isolated namespaces, a NAT node at 10.0.0.254 lets h1 reach the controller's REST API.
+
+12
+00:01:27,728 --> 00:01:29,904
+Four conversations make the system work.
+
+13
+00:01:30,304 --> 00:01:40,309
+First, clients talk to the log server over plain TCP sockets. The server is threaded, one thread per client, and replies ACK, BLOCKED, or DENIED.
+
+14
+00:01:40,709 --> 00:01:47,749
+Second, the log server calls the controller's REST API, saying what to do: block this IP, or deny this flow.
+
+15
+00:01:48,149 --> 00:01:53,440
+Third, the controller decides how, and sends OpenFlow flow-mod messages to the switch.
+
+16
+00:01:53,840 --> 00:02:00,197
+Fourth, every second, the controller polls flow statistics from the switch, and serves them back to the log server.
+
+17
+00:02:01,897 --> 00:02:06,996
+Every connection is classified by source, destination and port, using a policy file.
+
+18
+00:02:07,396 --> 00:02:10,489
+That classification leads to one of three rule types.
+
+19
+00:02:10,889 --> 00:02:21,257
+Block, at priority 100, drops everything from one source IP. It's triggered by a flood: more than 8 messages in a 5-second window on the rate-limited port.
+
+20
+00:02:21,657 --> 00:02:28,719
+Deny, at priority 200, drops just one flow, when a host that isn't on the allow-list connects to the admin port.
+
+21
+00:02:29,119 --> 00:02:37,887
+And Allow, at priority 300, exempts trusted hosts like h2. Higher priority wins, so allow beats deny, and deny beats block.
+
+22
+00:02:39,587 --> 00:02:42,957
+Inside the switch, the controller builds a two-table pipeline.
+
+23
+00:02:43,357 --> 00:02:48,072
+Table zero is the policy table, holding the allow, deny, and block rules.
+
+24
+00:02:48,472 --> 00:02:55,213
+Anything that isn't dropped continues to table one, where the controller's learned MAC-address forwarding rules live.
+
+25
+00:02:55,613 --> 00:03:00,157
+So an allow rule simply means: skip the drop rules, and go straight to forwarding.
+
+26
+00:03:03,357 --> 00:03:08,200
+Let's watch it work. Scenario A: h3 starts flooding port 9000.
+
+27
+00:03:08,600 --> 00:03:13,955
+The log server counts messages per source in a sliding window. The first eight are acknowledged.
+
+28
+00:03:14,355 --> 00:03:20,413
+The ninth crosses the threshold. The server raises an alert, and posts a block request to the controller.
+
+29
+00:03:20,813 --> 00:03:29,965
+The controller installs a priority 100 drop rule on the switch. From now on, h3's packets die at s1, before they ever reach the server.
+
+30
+00:03:30,365 --> 00:03:38,792
+A blocked host goes quiet. So after 15 seconds of silence, the log server removes the rule, and h3 can reach the network again.
+
+31
+00:03:43,992 --> 00:03:51,459
+Scenario B is more surgical. h3 connects to the admin port, 9001, which only h2 may use.
+
+32
+00:03:51,859 --> 00:04:01,928
+The server replies DENIED, and installs a deny rule for exactly that flow: h3 to h1, TCP, port 9001, for 30 seconds.
+
+33
+00:04:02,328 --> 00:04:09,304
+Meanwhile, h3 can still use the logging service on port 9000, and h2 can still reach the admin port.
+
+34
+00:04:12,504 --> 00:04:16,621
+Scenario C: the trusted host h2 sends the very same flood.
+
+35
+00:04:17,021 --> 00:04:26,643
+When the log server starts, it installs a priority 300 allow rule for h2, and skips rate limiting for it. So every single message is acknowledged.
+
+36
+00:04:29,843 --> 00:04:31,464
+What if the controller crashes?
+
+37
+00:04:31,864 --> 00:04:39,501
+The log server has a circuit breaker. It logs one warning, keeps serving clients without stalling, and retries every five seconds.
+
+38
+00:04:39,901 --> 00:04:50,803
+A restarted controller has lost its rule table. So every two seconds, a reconcile loop compares the controller's rules with what the server expects, and re-installs anything missing.
+
+39
+00:04:51,203 --> 00:04:54,253
+The network heals itself, with no operator involved.
+
+40
+00:04:56,953 --> 00:05:00,111
+Detection doesn't have to come from the application alone.
+
+41
+00:05:00,511 --> 00:05:05,289
+The controller's statistics poller turns per-flow byte counters into per-source throughput.
+
+42
+00:05:05,689 --> 00:05:13,860
+With bandwidth detection enabled, a source measured above a threshold, say 3 megabits per second, is blocked on the switch's own evidence.
+
+43
+00:05:17,060 --> 00:05:26,959
+To measure the benefit, an experiment harness compares three conditions: idle; a static baseline, where the log server only monitors; and the dynamic firewall.
+
+44
+00:05:27,359 --> 00:05:38,793
+Each runs at low, medium, and high flood intensity, measuring the legitimate host's throughput, latency and loss, plus the attacker's accepted traffic, time to block, and packets dropped.
+
+45
+00:05:39,193 --> 00:05:44,399
+The harness and analysis scripts are written and tested; running them on Mininet is the next step.
+
+46
+00:05:44,799 --> 00:05:52,948
+Unit tests and a localhost end-to-end test cover the rule engine, the policy server, and real OpenFlow message serialisation.
+
+47
+00:05:54,648 --> 00:05:59,363
+To sum up: the application detects, the controller decides, and the switch enforces.
+
+48
+00:05:59,763 --> 00:06:09,768
+Block for misbehaving hosts, deny for unauthorised flows, allow for trusted ones; all installed and removed at run time. That's a dynamic firewall.
+
